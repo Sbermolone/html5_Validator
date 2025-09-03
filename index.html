@@ -17,23 +17,17 @@
     .badge {
       display:inline-flex; align-items:center; border-radius:9999px;
       padding:2px 10px; font-size:12px; font-weight:600;
-      background:#1e40af; color:#fff;
+      background:#0f3b82; color:#fff;
     }
     .panel {
-      background: #ffffff;
-      border-radius: 1rem;
-      box-shadow: 0 4px 12px rgba(30,58,95,0.1);
+      background:#fff; border-radius:1rem;
+      box-shadow:0 4px 12px rgba(30,58,95,0.1);
     }
     .btn-main {
-      background: #2563eb;
-      color: #fff;
-      padding: 0.5rem 1.25rem;
-      border-radius: 0.75rem;
-      font-weight: 500;
+      background:#2563eb; color:#fff; padding:0.5rem 1.25rem;
+      border-radius:0.75rem; font-weight:500;
     }
-    .btn-main:hover {
-      background: #1d4ed8;
-    }
+    .btn-main:hover { background:#1d4ed8; }
   </style>
 </head>
 <body>
@@ -77,7 +71,7 @@
       <input type="file" id="fileInput" accept=".zip" class="hidden"/>
       <p class="text-lg font-medium text-blue-900">Drag & drop your ZIP here</p>
       <p class="text-sm text-blue-700">or</p>
-      <label for="fileInput" class="btn-main cursor-pointer">Browse…</label>
+      <label for="fileInput" class="btn-main cursor-pointer mt-3 inline-block">Browse…</label>
     </section>
 
     <!-- Results -->
@@ -105,8 +99,241 @@
   </div>
 
   <script>
-    // JS logic (same as before, shortened here for brevity).
-    // ... keep the validator code you already have ...
+    const $ = (sel) => document.querySelector(sel);
+
+    const DEFAULT_RULESETS = {
+      cm360: { initialKB: 150, totalKB: 2200, zipKB: 200, requireClickTag: true, allowHttp: false },
+      dv360: { initialKB: 200, totalKB: 5000, zipKB: 200, requireClickTag: true, allowHttp: false },
+      gam:   { initialKB: 150, totalKB: 2200, zipKB: 200, requireClickTag: true, allowHttp: false },
+      custom:{ initialKB: 150, totalKB: 2200, zipKB: 200, requireClickTag: true, allowHttp: false }
+    };
+
+    function setRulesetUI(key) {
+      const r = DEFAULT_RULESETS[key] || DEFAULT_RULESETS.custom;
+      $("#initialKB").value = r.initialKB;
+      $("#totalKB").value   = r.totalKB;
+      $("#zipKB").value     = r.zipKB;
+    }
+    $("#ruleset").addEventListener("change", (e) => setRulesetUI(e.target.value));
+    setRulesetUI("cm360");
+
+    // Drag & drop
+    const dropzone = $("#dropzone");
+    dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("bg-blue-50"); });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("bg-blue-50"));
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("bg-blue-50");
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (file) validateZip(file);
+    });
+
+    // File selection handler (this was missing before)
+    $("#fileInput").addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (file) validateZip(file);
+    });
+
+    function bytesToKB(b){ return Math.round(b / 1024); }
+    function bytesToMB(b){ return Math.round((b / (1024*1024)) * 100)/100; }
+
+    async function validateZip(file){
+      const rules = {
+        initialKB: +$("#initialKB").value || 150,
+        totalKB: +$("#totalKB").value || 2200,
+        zipKB: +$("#zipKB").value || 200,
+        requireClickTag: true,
+        allowHttp: false
+      };
+      const errors = [];
+      const warnings = [];
+      const info = [];
+      let summaryStatus = "PASS";
+
+      // ZIP size
+      const zipSizeKB = bytesToKB(file.size);
+      if (zipSizeKB > rules.zipKB) errors.push(`ZIP size ${zipSizeKB}KB exceeds cap ${rules.zipKB}KB.`);
+      else info.push(`ZIP size: ${zipSizeKB}KB`);
+
+      // Load ZIP
+      let zip;
+      try {
+        const ab = await file.arrayBuffer();
+        zip = await JSZip.loadAsync(ab);
+      } catch (err){
+        errors.push("Failed to read ZIP: " + err.message);
+        return showResults({errors,warnings,info,summaryStatus:"FAIL"});
+      }
+
+      // Read entries
+      const files = [];
+      const names = Object.keys(zip.files);
+      await Promise.all(names.map(async (path) => {
+        const entry = zip.files[path];
+        if (entry.dir) return;
+        const ext = (path.split('.').pop() || '').toLowerCase();
+        const textLike = /^(html?|css|js|svg|txt|json)$/i.test(ext);
+        let size = 0, text = "";
+        try {
+          const bin = await entry.async("uint8array");
+          size = bin.byteLength;
+          if (textLike) {
+            try { text = new TextDecoder("utf-8", {fatal:false}).decode(bin); } catch(e){ text = ""; }
+          }
+        } catch(e){
+          size = entry._data?.uncompressedSize || 0;
+        }
+        files.push({ path, size, ext, text });
+      }));
+
+      const totalBytes = files.reduce((s,f)=>s+f.size,0);
+      const totalUnzippedKB = bytesToKB(totalBytes);
+      info.push(`Unzipped total: ${totalUnzippedKB}KB (${bytesToMB(totalBytes)}MB)`);
+
+      // index.html
+      const indexFile = files.find(f => /(^|\/)index\.html$/i.test(f.path));
+      if (!indexFile) errors.push("Missing index.html.");
+      else if (!/^index\.html$/i.test(indexFile.path)) warnings.push(`index.html is nested at ${indexFile.path}. Many ad servers expect it at the root.`);
+
+      // Blocked file types
+      const blocked = files.filter(f => /\.(exe|bat|cmd|sh|php|py|jar|dll)$/i.test(f.path));
+      if (blocked.length) errors.push(`Blocked file types present: ${blocked.map(f=>f.path).join(", ")}`);
+
+      // External URLs & HTTP
+      const extUrlPattern = /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi;
+      const externalUrls = new Set();
+      const httpUrls = new Set();
+      for (const f of files){
+        if (!f.text) continue;
+        let m; const t = f.text;
+        while ((m = extUrlPattern.exec(t)) !== null) {
+          const url = m[1];
+          if (/^data:|^mailto:|^tel:|^#/.test(url)) continue;
+          if (/^https?:\/\//i.test(url) || /^\/\//.test(url)) {
+            externalUrls.add(url);
+            if (/^http:\/\//i.test(url)) httpUrls.add(url);
+          }
+        }
+      }
+      if (externalUrls.size) warnings.push(`External asset URLs found (${externalUrls.size}). Consider packaging locally. Examples: ${Array.from(externalUrls).slice(0,3).join(", ")}`);
+      if (httpUrls.size) errors.push(`Insecure HTTP URLs found: ${Array.from(httpUrls).slice(0,3).join(", ")}… Use HTTPS.`);
+
+      // Parse index.html for ad.size + asset refs
+      let initialAssetBytes = 0;
+      let hasAdSize = false;
+      let hasClickTag = false;
+      let hasEnablerExit = false;
+
+      function normalize(p){ return (p || "").replace(/^\.?\//,''); }
+
+      if (indexFile && indexFile.text){
+        try {
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(indexFile.text, "text/html");
+
+          const meta = doc.querySelector('meta[name="ad.size"]');
+          if (meta && meta.content) { hasAdSize = true; info.push(`ad.size: ${meta.content}`); }
+          else warnings.push('Missing <meta name="ad.size"> (often required).');
+
+          const refs = [];
+          doc.querySelectorAll("script[src], link[rel=stylesheet][href], img[src], video source[src], audio source[src]")
+            .forEach(el => {
+              const url = el.getAttribute("src") || el.getAttribute("href");
+              if (url) refs.push(url);
+            });
+
+          const idxDir = indexFile.path.replace(/\/index\.html$/i, "");
+          const normalized = new Set(refs.map(r => {
+            let rr = r.replace(/^\.?\//,'');
+            if (!/^[a-z]+:|^\/\//i.test(rr) && idxDir) rr = (idxDir + "/" + rr).replace(/^\//,'');
+            return rr;
+          }));
+
+          for (const f of files){
+            const name = normalize(f.path);
+            if (normalized.has(name)) initialAssetBytes += f.size;
+          }
+
+          const html = indexFile.text;
+          hasClickTag = /\b(clickTag|clickTAG|clicktag)\b/.test(html);
+          hasEnablerExit = /\bEnabler\s*\.\s*exit\s*\(/.test(html);
+        } catch(e){
+          warnings.push("Unable to parse index.html DOM cleanly.");
+        }
+      }
+
+      // Also scan JS for click handling
+      if (!hasClickTag || !hasEnablerExit){
+        const jsMatchesCT = files.some(f => f.ext === "js" && /\b(clickTag|clickTAG|clicktag)\b/.test(f.text || ""));
+        const jsMatchesEn = files.some(f => f.ext === "js" && /\bEnabler\s*\.\s*exit\s*\(/.test(f.text || ""));
+        hasClickTag = hasClickTag || jsMatchesCT;
+        hasEnablerExit = hasEnablerExit || jsMatchesEn;
+      }
+
+      if (!hasClickTag && !hasEnablerExit) errors.push("Missing click handling: expected global clickTag or Studio Enabler.exit().");
+      else info.push("Click handling detected: " + [hasClickTag ? "clickTag" : null, hasEnablerExit ? "Enabler.exit" : null].filter(Boolean).join(" + "));
+
+      // document.write usage
+      const usesDocWrite = files.some(f => (f.text||"").includes("document.write("));
+      if (usesDocWrite) warnings.push("Usage of document.write() detected; often discouraged for ads.");
+
+      // Size checks
+      const initialKB = bytesToKB(initialAssetBytes);
+      if (initialKB > rules.initialKB) errors.push(`Estimated initial load ${initialKB}KB exceeds cap ${rules.initialKB}KB.`);
+      else info.push(`Estimated initial load: ${initialKB}KB`);
+      if (totalUnzippedKB > rules.totalKB) errors.push(`Total unzipped size ${totalUnzippedKB}KB exceeds cap ${rules.totalKB}KB.`);
+
+      // Final status
+      if (errors.length) summaryStatus = "FAIL";
+      else if (warnings.length) summaryStatus = "WARN";
+      else summaryStatus = "PASS";
+
+      showResults({errors,warnings,info,summaryStatus,meta:{zipKB:zipSizeKB,totalKB:totalUnzippedKB,initialKB}});
+    }
+
+    function showResults({errors,warnings,info,summaryStatus,meta={}}){
+      $("#results").classList.remove("hidden");
+      const summary = $("#summary");
+      const tone = summaryStatus === "PASS" ? "bg-blue-100 border-blue-300" :
+                   summaryStatus === "WARN" ? "bg-blue-50 border-blue-200" :
+                   "bg-blue-50 border-blue-300";
+      summary.innerHTML = `
+        <div class="rounded-2xl border p-4 ${tone}">
+          <div class="flex items-center gap-3">
+            <div class="badge">${summaryStatus}</div>
+            <div class="text-sm text-blue-900">
+              Errors: <strong>${errors.length}</strong> · Warnings: <strong>${warnings.length}</strong>
+            </div>
+          </div>
+        </div>`;
+
+      const eul = $("#errors"); eul.innerHTML = "";
+      errors.forEach(e => { const li = document.createElement("li"); li.textContent = e; eul.appendChild(li); });
+
+      const wul = $("#warnings"); wul.innerHTML = "";
+      warnings.forEach(w => { const li = document.createElement("li"); li.textContent = w; wul.appendChild(li); });
+
+      const inf = $("#info"); inf.innerHTML = "";
+      info.forEach(i => { const p = document.createElement("div"); p.textContent = "• " + i; inf.appendChild(p); });
+
+      const payload = { status: summaryStatus, errors, warnings, info, meta };
+      $("#downloadJson").onclick = () =>
+        downloadBlob(JSON.stringify(payload, null, 2), "h5-validator-results.json", "application/json");
+
+      const rows = []
+        .concat(errors.map(m => ({category:"ERROR", message:m})))
+        .concat(warnings.map(m => ({category:"WARNING", message:m})));
+      const csv = "category,message\n" + rows.map(r => JSON.stringify(r.category) + "," + JSON.stringify(r.message)).join("\n");
+      $("#downloadCsv").onclick = () => downloadBlob(csv, "h5-validator-results.csv", "text/csv");
+    }
+
+    function downloadBlob(content, filename, type){
+      const blob = new Blob([content], {type});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 200);
+    }
   </script>
 </body>
 </html>
