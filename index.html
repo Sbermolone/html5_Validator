@@ -1,0 +1,337 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>HTML5 Creative Validator (CM360-style)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- JSZip for in-browser ZIP parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <style>
+    .badge { @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div class="max-w-5xl mx-auto p-6">
+    <header class="mb-6">
+      <h1 class="text-2xl font-bold">HTML5 Creative Validator (CM360‑style)</h1>
+      <p class="text-sm text-gray-600 mt-2">
+        Drop a <code>.zip</code> with your HTML5 banner assets. This runs fully in your browser.
+      </p>
+      <div class="mt-3 text-xs text-gray-500">
+        Defaults modeled on legacy Google h5validator and public docs. Tune thresholds below.
+      </div>
+    </header>
+
+    <section class="mb-4 bg-white rounded-2xl shadow p-4">
+      <div class="flex flex-col md:flex-row md:items-end gap-4">
+        <div class="flex-1">
+          <label for="ruleset" class="block text-sm font-medium">Ruleset</label>
+          <select id="ruleset" class="mt-1 w-full rounded-lg border-gray-300">
+            <option value="cm360">CM360‑style (initial 150KB, total 2.2MB)</option>
+            <option value="dv360">DV360‑style (total 5MB cap)</option>
+            <option value="gam">Google Ad Manager‑style (clickTag required)</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </div>
+        <div class="flex-1">
+          <label class="block text-sm font-medium">Initial load limit (KB)</label>
+          <input id="initialKB" type="number" class="mt-1 w-full rounded-lg border-gray-300" value="150">
+        </div>
+        <div class="flex-1">
+          <label class="block text-sm font-medium">Total load cap (KB)</label>
+          <input id="totalKB" type="number" class="mt-1 w-full rounded-lg border-gray-300" value="2200">
+        </div>
+        <div class="flex-1">
+          <label class="block text-sm font-medium">ZIP size cap (KB)</label>
+          <input id="zipKB" type="number" class="mt-1 w-full rounded-lg border-gray-300" value="200">
+        </div>
+      </div>
+      <p class="text-xs text-gray-500 mt-3">
+        Sources: Google CM360 HTML5 prep, DV360 guidelines, and Google ad policies (initial 150KB / ~2.2MB polite load are common). Adjust per publisher spec.
+      </p>
+    </section>
+
+    <section class="mb-6 bg-white rounded-2xl shadow p-8 text-center border-2 border-dashed border-gray-300" id="dropzone">
+      <input type="file" id="fileInput" accept=".zip" class="hidden"/>
+      <p class="text-lg font-medium">Drag & drop your ZIP here</p>
+      <p class="text-sm text-gray-600">or</p>
+      <button id="browseBtn" class="mt-2 px-4 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700">Browse…</button>
+    </section>
+
+    <section id="results" class="hidden mb-10">
+      <div id="summary" class="mb-4"></div>
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="bg-white rounded-2xl shadow p-4">
+          <h2 class="font-semibold mb-2">Errors</h2>
+          <ul id="errors" class="list-disc pl-5 text-red-700"></ul>
+        </div>
+        <div class="bg-white rounded-2xl shadow p-4">
+          <h2 class="font-semibold mb-2">Warnings</h2>
+          <ul id="warnings" class="list-disc pl-5 text-amber-700"></ul>
+        </div>
+      </div>
+
+      <div class="mt-6 bg-white rounded-2xl shadow p-4">
+        <h3 class="font-semibold mb-3">Info</h3>
+        <div id="info" class="text-sm text-gray-800 space-y-1"></div>
+      </div>
+
+      <div class="mt-6 flex flex-wrap gap-3">
+        <button id="downloadJson" class="px-4 py-2 rounded-xl bg-gray-800 text-white hover:bg-gray-900">Download JSON</button>
+        <button id="downloadCsv" class="px-4 py-2 rounded-xl bg-gray-800 text-white hover:bg-gray-900">Download CSV</button>
+      </div>
+    </section>
+
+    <footer class="mt-12 text-xs text-gray-500">
+      <p><strong>Notes</strong>:</p>
+      <ul class="list-disc pl-5 space-y-1">
+        <li>Detects <code>index.html</code>, <code>&lt;meta name="ad.size"&gt;</code>, <code>clickTag</code>/Studio <code>Enabler.exit()</code>, HTTPS usage, external URLs, blocked types, rough initial load, and size caps.</li>
+        <li>“Initial load” here estimates the sum of assets referenced directly by <code>index.html</code>; dynamic loads may differ at runtime.</li>
+        <li>Tune thresholds per publisher/platform. Some specs differ (DV360 5MB total, many pubs 2.2MB total, initial 150–200KB, etc.).</li>
+      </ul>
+    </footer>
+  </div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+
+const DEFAULT_RULESETS = {
+  cm360: { initialKB: 150, totalKB: 2200, zipKB: 200, requireClickTag: true, allowHttp: false },
+  dv360: { initialKB: 200, totalKB: 5000, zipKB: 200, requireClickTag: true, allowHttp: false },
+  gam:   { initialKB: 150, totalKB: 2200, zipKB: 200, requireClickTag: true, allowHttp: false },
+  custom:{ initialKB: 150, totalKB: 2200, zipKB: 200, requireClickTag: true, allowHttp: false }
+};
+
+function setRulesetUI(key) {
+  const r = DEFAULT_RULESETS[key] || DEFAULT_RULESETS.custom;
+  $("#initialKB").value = r.initialKB;
+  $("#totalKB").value   = r.totalKB;
+  $("#zipKB").value     = r.zipKB;
+}
+
+$("#ruleset").addEventListener("change", (e) => setRulesetUI(e.target.value));
+setRulesetUI("cm360");
+
+$("#browseBtn").addEventListener("click", () => $("#fileInput").click());
+
+const dropzone = $("#dropzone");
+dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("bg-indigo-50"); });
+dropzone.addEventListener("dragleave", () => dropzone.classList.remove("bg-indigo-50"));
+dropzone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropzone.classList.remove("bg-indigo-50");
+  const file = e.dataTransfer.files[0];
+  if (file) validateZip(file);
+});
+$("#fileInput").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) validateZip(file);
+});
+
+function bytesToKB(b){ return Math.round(b / 1024); }
+function bytesToMB(b){ return Math.round((b / (1024*1024)) * 100)/100; }
+
+async function validateZip(file){
+  const rules = {
+    initialKB: +$("#initialKB").value || 150,
+    totalKB: +$("#totalKB").value || 2200,
+    zipKB: +$("#zipKB").value || 200,
+    requireClickTag: true,
+    allowHttp: false
+  };
+  const errors = [];
+  const warnings = [];
+  const info = [];
+  let summaryStatus = "PASS";
+
+  const zipSizeKB = bytesToKB(file.size);
+  if (zipSizeKB > rules.zipKB) {
+    errors.push(`ZIP size ${zipSizeKB}KB exceeds cap ${rules.zipKB}KB.`);
+  } else {
+    info.push(`ZIP size: ${zipSizeKB}KB`);
+  }
+
+  let zip;
+  try {
+    const ab = await file.arrayBuffer();
+    zip = await JSZip.loadAsync(ab);
+  } catch (err){
+    errors.push("Failed to read ZIP: " + err.message);
+    return showResults({errors,warnings,info,summaryStatus:"FAIL"});
+  }
+
+  // Gather files
+  const files = [];
+  await Promise.all(Object.keys(zip.files).map(async (path) => {
+    const entry = zip.files[path];
+    if (entry.dir) return;
+    const ext = path.split('.').pop().toLowerCase();
+    const textLike = /^(html?|css|js|svg|txt|json)$/i.test(ext);
+    const size = entry._data ? entry._data.uncompressedSize : (await entry.async("uint8array")).byteLength;
+    let text = "";
+    if (textLike) {
+      try { text = await entry.async("string"); } catch(e){ /* ignore */ }
+    }
+    files.push({ path, size, ext, text });
+  }));
+
+  const totalUnzippedKB = bytesToKB(files.reduce((s,f)=>s+f.size,0));
+  info.push(`Unzipped total: ${totalUnzippedKB}KB (${bytesToMB(files.reduce((s,f)=>s+f.size,0))}MB)`);
+
+  // Find index.html (case-insensitive)
+  const indexFile = files.find(f => /(^|\/)index\.html$/i.test(f.path));
+  if (!indexFile){
+    errors.push("Missing index.html at root of ZIP.");
+  }
+
+  // Blocked file types
+  const blocked = files.filter(f => /\.(exe|bat|cmd|sh|php|py|jar|dll)$/i.test(f.path));
+  if (blocked.length){
+    errors.push(`Blocked file types present: ${blocked.map(f=>f.path).join(", ")}`);
+  }
+
+  // External URL detection + HTTP usage
+  const extUrlPattern = /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi;
+  const externalUrls = new Set();
+  const httpUrls = new Set();
+  for (const f of files){
+    if (!f.text) continue;
+    const text = f.text;
+    let m;
+    while ((m = extUrlPattern.exec(text)) !== null) {
+      const url = m[1];
+      if (/^data:|^mailto:|^tel:|^#/.test(url)) continue;
+      if (/^(https?:)?\/\//i.test(url) || /^https?:/i.test(url)) {
+        externalUrls.add(url);
+        if (/^http:/.test(url)) httpUrls.add(url);
+      }
+    }
+  }
+  if (externalUrls.size) {
+    warnings.push(`External asset URLs found (${externalUrls.size}). Consider packaging assets locally. Examples: ${Array.from(externalUrls).slice(0,3).join(", ")}`);
+  }
+  if (httpUrls.size) {
+    errors.push(`Insecure HTTP URLs found: ${Array.from(httpUrls).slice(0,3).join(", ")}… Use HTTPS.`);
+  }
+
+  // Parse index.html and detect ad.size and referenced assets
+  let initialAssetBytes = 0;
+  let hasAdSize = false;
+  let adSizeStr = "";
+  let hasClickTag = false;
+  let hasEnablerExit = false;
+  if (indexFile && indexFile.text){
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(indexFile.text, "text/html");
+      // ad.size meta
+      const meta = doc.querySelector('meta[name="ad.size"]');
+      if (meta && meta.content) {
+        hasAdSize = true;
+        adSizeStr = meta.content;
+        info.push(`ad.size: ${adSizeStr}`);
+      } else {
+        warnings.push("Missing <meta name=\"ad.size\"> (often required by publishers/validators).");
+      }
+      // references
+      const refs = [];
+      doc.querySelectorAll("script[src], link[rel=stylesheet][href], img[src], video source[src], audio source[src]").forEach(el => {
+        const url = el.getAttribute("src") || el.getAttribute("href");
+        if (url) refs.push(url);
+      });
+      // map to files
+      const normalized = new Set(refs.map(r => r.replace(/^\.\//,'').replace(/^\//,'')));
+      for (const f of files){
+        const name = f.path.replace(/^\.\//,'').replace(/^\//,'');
+        if (normalized.has(name)) initialAssetBytes += f.size;
+      }
+      // clickTag / Enabler detection (HTML markup)
+      const html = indexFile.text;
+      const ctRegex = /\b(clickTag|clickTAG|clicktag)\b/;
+      hasClickTag = ctRegex.test(html);
+      const enRegex = /\bEnabler\s*\.\s*exit\s*\(/;
+      hasEnablerExit = enRegex.test(html);
+    } catch (e){
+      warnings.push("Unable to parse index.html DOM cleanly.");
+    }
+  }
+
+  // clickTag/exit detection across JS files too
+  if (!hasClickTag || !hasEnablerExit){
+    const jsMatchesCT = files.some(f => f.ext === "js" && /\b(clickTag|clickTAG|clicktag)\b/.test(f.text || ""));
+    const jsMatchesEn = files.some(f => f.ext === "js" && /\bEnabler\s*\.\s*exit\s*\(/.test(f.text || ""));
+    hasClickTag = hasClickTag || jsMatchesCT;
+    hasEnablerExit = hasEnablerExit || jsMatchesEn;
+  }
+
+  if (!hasClickTag && !hasEnablerExit) {
+    errors.push("Missing click handling: expected global clickTag or Studio Enabler.exit().");
+  } else {
+    info.push(`Click handling detected: ${(hasClickTag? "clickTag " : "")}${(hasEnablerExit? "Enabler.exit" : "")}`.trim());
+  }
+
+  // Document.write
+  const usesDocWrite = files.some(f => (f.text||"").includes("document.write("));
+  if (usesDocWrite) warnings.push("Usage of document.write() detected; often discouraged for ads.");
+
+  // Size checks
+  const initialKB = bytesToKB(initialAssetBytes);
+  if (initialKB > rules.initialKB) {
+    errors.push(`Estimated initial load ${initialKB}KB exceeds cap ${rules.initialKB}KB.`);
+  } else {
+    info.push(`Estimated initial load: ${initialKB}KB`);
+  }
+  if (totalUnzippedKB > rules.totalKB) {
+    errors.push(`Total unzipped size ${totalUnzippedKB}KB exceeds cap ${rules.totalKB}KB.`);
+  }
+
+  if (errors.length) summaryStatus = "FAIL";
+  else if (warnings.length) summaryStatus = "WARN";
+  else summaryStatus = "PASS";
+
+  showResults({errors,warnings,info,summaryStatus,meta:{zipKB:zipSizeKB,totalKB:totalUnzippedKB,initialKB}});
+}
+
+function showResults({errors,warnings,info,summaryStatus,meta={}}){
+  $("#results").classList.remove("hidden");
+  const summary = $("#summary");
+  const color = summaryStatus === "PASS" ? "green" : summaryStatus === "WARN" ? "amber" : "red";
+  summary.innerHTML = \`
+    <div class="rounded-2xl border p-4 bg-\${color}-50 border-\${color}-200">
+      <div class="flex items-center gap-3">
+        <div class="badge bg-\${color}-600 text-white">\${summaryStatus}</div>
+        <div class="text-sm text-gray-800">Errors: <strong>\${errors.length}</strong> · Warnings: <strong>\${warnings.length}</strong></div>
+      </div>
+    </div>\`;
+
+  const eul = $("#errors"); eul.innerHTML = "";
+  errors.forEach(e => { const li = document.createElement("li"); li.textContent = e; eul.appendChild(li); });
+
+  const wul = $("#warnings"); wul.innerHTML = "";
+  warnings.forEach(w => { const li = document.createElement("li"); li.textContent = w; wul.appendChild(li); });
+
+  const inf = $("#info"); inf.innerHTML = "";
+  info.forEach(i => { const p = document.createElement("div"); p.textContent = "• " + i; inf.appendChild(p); });
+
+  const payload = { status: summaryStatus, errors, warnings, info, meta };
+  $("#downloadJson").onclick = () => downloadBlob(JSON.stringify(payload, null, 2), "h5-validator-results.json", "application/json");
+  // CSV: category,message
+  const rows = []
+    .concat(errors.map(m => ({category:"ERROR", message:m})))
+    .concat(warnings.map(m => ({category:"WARNING", message:m})));
+  const csv = "category,message\n" + rows.map(r => JSON.stringify(r.category) + "," + JSON.stringify(r.message)).join("\n");
+  $("#downloadCsv").onclick = () => downloadBlob(csv, "h5-validator-results.csv", "text/csv");
+}
+
+function downloadBlob(content, filename, type){
+  const blob = new Blob([content], {type});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 200);
+}
+</script>
+</body>
+</html>
