@@ -38,8 +38,15 @@
       display: none;
     }
     /* Alert */
-    #alert {
-      display:none;
+    #alert { display:none; }
+    /* Preview */
+    #previewCard { display:none; }
+    #previewFrame {
+      width: 100%;
+      height: 350px; /* you can change this or make it dynamic */
+      border: 1px solid #c7ddff;
+      border-radius: 0.75rem;
+      background: #fff;
     }
   </style>
 </head>
@@ -100,9 +107,22 @@
       <div id="picked" class="mt-3 text-sm text-blue-800"></div>
     </section>
 
-    <!-- Results -->
-    <section id="results" class="hidden mb-10">
-      <div id="summary" class="mb-6"></div>
+    <!-- Results Summary -->
+    <section id="results" class="hidden mb-6">
+      <div id="summary" class="mb-4"></div>
+    </section>
+
+    <!-- Preview (between summary and error lists) -->
+    <section id="previewCard" class="panel mb-8 p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-blue-900">Preview</h3>
+        <div class="text-xs text-blue-800" id="previewHint">Sandboxed preview (assets served from memory)</div>
+      </div>
+      <iframe id="previewFrame" sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-modals"></iframe>
+    </section>
+
+    <!-- Detailed results -->
+    <section id="details" class="hidden mb-10">
       <div class="grid md:grid-cols-2 gap-6">
         <div class="panel p-4">
           <h2 class="font-semibold mb-2 text-blue-900">Errors</h2>
@@ -131,14 +151,8 @@
     const $ = (sel) => document.querySelector(sel);
 
     // Toast helpers
-    function showToast(msg="Validating…") {
-      const t = $("#toast");
-      t.textContent = msg;
-      t.style.display = "block";
-    }
-    function hideToast() {
-      $("#toast").style.display = "none";
-    }
+    function showToast(msg="Validating…") { const t=$("#toast"); t.textContent=msg; t.style.display="block"; }
+    function hideToast(){ $("#toast").style.display="none"; }
 
     // Alert helpers
     function showAlert(messages) {
@@ -147,12 +161,9 @@
         list.map(m => "<li>"+escapeHtml(m)+"</li>").join("") + "</ul>";
       $("#alert").style.display = "block";
     }
-    function hideAlert() { $("#alert").style.display = "none"; }
+    function hideAlert(){ $("#alert").style.display="none"; }
     $("#alertClose").addEventListener("click", hideAlert);
-
-    function escapeHtml(s){
-      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
     const DEFAULT_RULESETS = {
       cm360: { initialKB: 150, totalKB: 2200, zipKB: 200, requireClickTag: true, allowHttp: false },
@@ -190,10 +201,11 @@
     function bytesToKB(b){ return Math.round(b / 1024); }
     function bytesToMB(b){ return Math.round((b / (1024*1024)) * 100)/100; }
 
+    let previewUrls = []; // track blob URLs to revoke
+
     function startValidation(file){
       hideAlert();
       showToast("Validating…");
-      // Allow the toast to render before heavy work
       setTimeout(() => validateZip(file).catch(err => {
         hideToast();
         showAlert(["Unexpected error while validating.", err && err.message ? err.message : String(err)]);
@@ -201,6 +213,12 @@
     }
 
     async function validateZip(file){
+      // Revoke prior preview URLs
+      previewUrls.forEach(URL.revokeObjectURL);
+      previewUrls = [];
+      $("#previewCard").style.display = "none";
+      $("#previewFrame").src = "about:blank";
+
       const rules = {
         initialKB: +$("#initialKB").value || 150,
         totalKB: +$("#totalKB").value || 2200,
@@ -226,6 +244,7 @@
         return finish({errors,warnings,info,summaryStatus:"FAIL"});
       }
 
+      // Read entries
       const files = [];
       const names = Object.keys(zip.files);
       await Promise.all(names.map(async (path) => {
@@ -233,28 +252,31 @@
         if (entry.dir) return;
         const ext = (path.split('.').pop() || '').toLowerCase();
         const textLike = /^(html?|css|js|svg|txt|json)$/i.test(ext);
-        let size = 0, text = "";
+        let bin = null, text = "";
         try {
-          const bin = await entry.async("uint8array");
-          size = bin.byteLength;
-          if (textLike) { try { text = new TextDecoder("utf-8").decode(bin); } catch{} }
-        } catch(e){
-          size = entry._data?.uncompressedSize || 0;
-        }
-        files.push({ path, size, ext, text });
+          bin = await entry.async("uint8array");
+          if (textLike) {
+            try { text = new TextDecoder("utf-8").decode(bin); } catch {}
+          }
+        } catch(e){}
+        const size = bin ? bin.byteLength : (entry._data?.uncompressedSize || 0);
+        files.push({ path, size, ext, bin, text });
       }));
 
       const totalBytes = files.reduce((s,f)=>s+f.size,0);
       const totalUnzippedKB = bytesToKB(totalBytes);
       info.push(`Unzipped total: ${totalUnzippedKB}KB (${bytesToMB(totalBytes)}MB)`);
 
+      // index.html
       const indexFile = files.find(f => /(^|\/)index\.html$/i.test(f.path));
       if (!indexFile) errors.push("Missing index.html.");
       else if (!/^index\.html$/i.test(indexFile.path)) warnings.push(`index.html is nested at ${indexFile.path}. Many ad servers expect it at the root.`);
 
+      // Blocked file types
       const blocked = files.filter(f => /\.(exe|bat|cmd|sh|php|py|jar|dll)$/i.test(f.path));
       if (blocked.length) errors.push(`Blocked file types present: ${blocked.map(f=>f.path).join(", ")}`);
 
+      // External URLs & HTTP
       const extUrlPattern = /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi;
       const externalUrls = new Set();
       const httpUrls = new Set();
@@ -273,11 +295,10 @@
       if (externalUrls.size) warnings.push(`External asset URLs found (${externalUrls.size}). Consider packaging locally. Examples: ${Array.from(externalUrls).slice(0,3).join(", ")}`);
       if (httpUrls.size) errors.push(`Insecure HTTP URLs found: ${Array.from(httpUrls).slice(0,3).join(", ")}… Use HTTPS.`);
 
+      // ad.size + refs + click handling
       let initialAssetBytes = 0;
-      let hasAdSize = false;
       let hasClickTag = false;
       let hasEnablerExit = false;
-
       function normalize(p){ return (p || "").replace(/^\.?\//,''); }
 
       if (indexFile && indexFile.text){
@@ -286,15 +307,12 @@
           const doc = parser.parseFromString(indexFile.text, "text/html");
 
           const meta = doc.querySelector('meta[name="ad.size"]');
-          if (meta && meta.content) { hasAdSize = true; info.push(`ad.size: ${meta.content}`); }
-          else warnings.push('Missing <meta name="ad.size"> (often required).');
+          if (meta && meta.content) { info.push(`ad.size: ${meta.content}`); }
+          else { warnings.push('Missing <meta name="ad.size"> (often required).'); }
 
           const refs = [];
           doc.querySelectorAll("script[src], link[rel=stylesheet][href], img[src], video source[src], audio source[src]")
-            .forEach(el => {
-              const url = el.getAttribute("src") || el.getAttribute("href");
-              if (url) refs.push(url);
-            });
+            .forEach(el => { const url = el.getAttribute("src") || el.getAttribute("href"); if (url) refs.push(url); });
 
           const idxDir = indexFile.path.replace(/\/index\.html$/i, "");
           const normalized = new Set(refs.map(r => {
@@ -316,6 +334,7 @@
         }
       }
 
+      // JS scan too
       if (!hasClickTag || !hasEnablerExit){
         const jsMatchesCT = files.some(f => f.ext === "js" && /\b(clickTag|clickTAG|clicktag)\b/.test(f.text || ""));
         const jsMatchesEn = files.some(f => f.ext === "js" && /\bEnabler\s*\.\s*exit\s*\(/.test(f.text || ""));
@@ -326,25 +345,34 @@
       if (!hasClickTag && !hasEnablerExit) errors.push("Missing click handling: expected global clickTag or Studio Enabler.exit().");
       else info.push("Click handling detected: " + [hasClickTag ? "clickTag" : null, hasEnablerExit ? "Enabler.exit" : null].filter(Boolean).join(" + "));
 
+      // document.write usage
       const usesDocWrite = files.some(f => (f.text||"").includes("document.write("));
       if (usesDocWrite) warnings.push("Usage of document.write() detected; often discouraged for ads.");
 
+      // Size checks
       const initialKB = bytesToKB(initialAssetBytes);
       if (initialKB > rules.initialKB) errors.push(`Estimated initial load ${initialKB}KB exceeds cap ${rules.initialKB}KB.`);
       else info.push(`Estimated initial load: ${initialKB}KB`);
       if (totalUnzippedKB > rules.totalKB) errors.push(`Total unzipped size ${totalUnzippedKB}KB exceeds cap ${rules.totalKB}KB.`);
 
-      if (errors.length) summaryStatus = "FAIL";
-      else if (warnings.length) summaryStatus = "WARN";
-      else summaryStatus = "PASS";
+      // Build preview (only if index.html exists)
+      if (indexFile) {
+        try {
+          await buildPreview(files, indexFile);
+        } catch (e) {
+          warnings.push("Preview rendering failed: " + (e && e.message ? e.message : e));
+        }
+      }
 
+      // Status
+      const summaryStatus = errors.length ? "FAIL" : (warnings.length ? "WARN" : "PASS");
       return finish({errors,warnings,info,summaryStatus,meta:{zipKB:zipSizeKB,totalKB:totalUnzippedKB,initialKB}});
     }
 
     function finish(payload){
       hideToast();
 
-      // If FAIL, show a top error banner with reasons
+      // If FAIL, show top error banner with reasons
       if (payload.summaryStatus === "FAIL") {
         showAlert(payload.errors && payload.errors.length ? payload.errors : "The file failed validation.");
       } else {
@@ -356,6 +384,8 @@
 
     function showResults({errors,warnings,info,summaryStatus,meta={}}){
       $("#results").classList.remove("hidden");
+      $("#details").classList.remove("hidden");
+
       const summary = $("#summary");
       const tone = summaryStatus === "PASS" ? "bg-blue-100 border-blue-300" :
                    summaryStatus === "WARN" ? "bg-blue-50 border-blue-200" :
@@ -379,7 +409,6 @@
       const inf = $("#info"); inf.innerHTML = "";
       info.forEach(i => { const p = document.createElement("div"); p.textContent = "• " + i; inf.appendChild(p); });
 
-      // Downloads
       const payload = { status: summaryStatus, errors, warnings, info, meta };
       $("#downloadJson").onclick = () =>
         downloadBlob(JSON.stringify(payload, null, 2), "h5-validator-results.json", "application/json");
@@ -397,6 +426,77 @@
       const a = document.createElement("a");
       a.href = url; a.download = filename; document.body.appendChild(a); a.click();
       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 200);
+    }
+
+    // ===== Preview builder =====
+    const MIME = {
+      "html":"text/html","htm":"text/html","css":"text/css","js":"text/javascript","mjs":"text/javascript",
+      "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","gif":"image/gif","webp":"image/webp","svg":"image/svg+xml",
+      "mp4":"video/mp4","webm":"video/webm","ogg":"video/ogg",
+      "mp3":"audio/mpeg","wav":"audio/wav","json":"application/json","txt":"text/plain","woff":"font/woff","woff2":"font/woff2","ttf":"font/ttf","otf":"font/otf"
+    };
+
+    async function buildPreview(files, indexFile){
+      // 1) Create blob URLs for all assets
+      const urlMap = new Map(); // normalized path -> blobURL
+      function norm(p){ return (p || "").replace(/^\.?\//,''); }
+      // First pass: create blob URLs (text/binary) for each file
+      for (const f of files){
+        if (!f.bin) continue; // skip if couldn't read
+        const type = MIME[f.ext] || "application/octet-stream";
+        const blob = new Blob([f.bin], {type});
+        const u = URL.createObjectURL(blob);
+        urlMap.set(norm(f.path), u);
+        previewUrls.push(u);
+      }
+
+      // 2) Rewrite CSS url(...) to blob URLs (so nested images/fonts load)
+      for (const f of files.filter(x => x.ext === "css" && typeof x.text === "string")){
+        const baseDir = norm(f.path).replace(/\/[^\/]*$/,""); // directory of this css
+        const rewritten = (f.text || "").replace(/url\(([^)]+)\)/g, (m, raw) => {
+          let ref = raw.trim().replace(/^['"]|['"]$/g,"");
+          if (/^data:|^https?:|^\/\//i.test(ref)) return m; // leave absolute/data
+          const joined = baseDir ? (baseDir + "/" + ref).replace(/^\//,'') : ref.replace(/^\//,'');
+          const target = urlMap.get(norm(joined));
+          return target ? `url(${target})` : m;
+        });
+        const blob = new Blob([rewritten], {type:"text/css"});
+        const u = URL.createObjectURL(blob);
+        previewUrls.push(u);
+        urlMap.set(norm(f.path), u); // replace the css path to the rewritten blob URL
+      }
+
+      // 3) Rewrite the index.html to point to blob URLs
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(indexFile.text || "", "text/html");
+
+      function rewriteAttr(selector, attr){
+        doc.querySelectorAll(selector).forEach(el => {
+          const v = el.getAttribute(attr);
+          if (!v || /^data:|^https?:|^\/\//i.test(v) || /^#/.test(v)) return;
+          const idxDir = norm(indexFile.path).replace(/\/index\.html$/i, "");
+          let joined = v.replace(/^\.?\//,'');
+          if (idxDir) joined = (idxDir ? (idxDir + "/" + joined) : joined).replace(/^\//,'');
+          const blobUrl = urlMap.get(norm(joined));
+          if (blobUrl) el.setAttribute(attr, blobUrl);
+        });
+      }
+
+      rewriteAttr("script[src]", "src");
+      rewriteAttr('link[rel="stylesheet"][href]', "href");
+      rewriteAttr("img[src]", "src");
+      rewriteAttr("video source[src]", "src");
+      rewriteAttr("audio source[src]", "src");
+
+      // 4) Serialize modified HTML and show in iframe
+      const htmlStr = "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+      const htmlBlob = new Blob([htmlStr], {type:"text/html"});
+      const htmlUrl = URL.createObjectURL(htmlBlob);
+      previewUrls.push(htmlUrl);
+
+      const frame = $("#previewFrame");
+      frame.src = htmlUrl;
+      $("#previewCard").style.display = "block";
     }
   </script>
 </body>
