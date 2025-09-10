@@ -66,9 +66,19 @@
         <input id="zipKB" type="number" value="200" class="mt-1 w-full rounded-lg border-blue-200 focus:ring-blue-400 focus:border-blue-400">
       </div>
     </div>
-    <div class="mt-4 flex items-center gap-3">
-      <input id="strictCM360" type="checkbox" class="rounded border-blue-300 text-blue-600 focus:ring-blue-400">
-      <label for="strictCM360" class="text-sm text-blue-900">Strict CM360 mode (treat missing <code class="small">ad.size</code>, non-root <code class="small">index.html</code>, and external URLs as errors)</label>
+    <div class="mt-4 flex flex-col gap-2">
+      <div class="flex items-center gap-3">
+        <input id="strictCM360" type="checkbox" class="rounded border-blue-300 text-blue-600 focus:ring-blue-400">
+        <label for="strictCM360" class="text-sm text-blue-900">Strict CM360 mode (treat missing <code class="small">ad.size</code>, non-root <code class="small">index.html</code>, and external URLs as errors)</label>
+      </div>
+      <div class="flex items-center gap-3">
+        <input id="blockAnchors" type="checkbox" class="rounded border-blue-300 text-blue-600 focus:ring-blue-400" checked>
+        <label for="blockAnchors" class="text-sm text-blue-900">Disallow <code class="small">&lt;a&gt;</code> anchor tags</label>
+      </div>
+      <div class="flex items-center gap-3">
+        <input id="blockProtocolRelative" type="checkbox" class="rounded border-blue-300 text-blue-600 focus:ring-blue-400" checked>
+        <label for="blockProtocolRelative" class="text-sm text-blue-900">Treat protocol-relative URLs (<code class="small">//example.com</code>) as errors</label>
+      </div>
     </div>
   </section>
 
@@ -145,7 +155,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Toast & alerts
   const showToast = (m="Validating…") => { const t=$("#toast"); t.textContent=m; t.style.display="block"; };
   const hideToast = () => { $("#toast").style.display="none"; };
-  const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
   const showAlert = msgs => {
     const list = Array.isArray(msgs) ? msgs : [String(msgs)];
     $("#alertMsg").innerHTML = "<ul class='list-disc pl-5'>" + list.map(m => "<li>"+escapeHtml(m)+"</li>").join("") + "</ul>";
@@ -180,9 +190,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (file) { $("#picked").textContent = `Selected: ${file.name}`; startValidation(file); }
   });
 
-  // File input (make sure change always fires, even for same file)
+  // File input (re-trigger on same file)
   const input = $("#fileInput");
-  input.addEventListener("click", () => { input.value = ""; }); // key fix: reset so same file re-triggers change
+  input.addEventListener("click", () => { input.value = ""; });
   input.addEventListener("change", e => {
     const file = e.target.files && e.target.files[0];
     if (file) { $("#picked").textContent = `Selected: ${file.name}`; startValidation(file); }
@@ -191,6 +201,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Helpers
   const bytesToKB = b => Math.round(b/1024);
   const bytesToMB = b => Math.round((b/(1024*1024))*100)/100;
+  const setAdd = (set, vals) => { for (const v of vals) set.add(v); return set; };
 
   let previewUrls = [];
 
@@ -199,7 +210,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast("Validating…");
     setTimeout(() => validateZip(file).catch(err => {
       hideToast(); showAlert(["Unexpected error while validating.", err?.message || String(err)]);
-    }), 50);
+    }), 30);
   }
 
   async function validateZip(file){
@@ -211,26 +222,29 @@ document.addEventListener('DOMContentLoaded', () => {
     $("#initialRows").innerHTML = "";
 
     const strict = $("#strictCM360").checked;
+    const blockAnchors = $("#blockAnchors").checked;
+    const blockProtocolRelative = $("#blockProtocolRelative").checked;
+
     const rules = {
       initialKB: +$("#initialKB").value || 150,
       totalKB: +$("#totalKB").value || 2200,
       zipKB: +$("#zipKB").value || 200
     };
+
     const errors = [], warnings = [], info = [], initialItems = [];
+    const addError = m => errors.push(m);
+    const addWarn  = m => warnings.push(m);
+    const addInfo  = m => info.push(m);
 
     // ZIP size
     const zipSizeKB = bytesToKB(file.size);
-    if (zipSizeKB > rules.zipKB) errors.push(`ZIP size ${zipSizeKB}KB exceeds cap ${rules.zipKB}KB.`);
-    else info.push(`ZIP size: ${zipSizeKB}KB`);
+    if (zipSizeKB > rules.zipKB) addError(`ZIP size ${zipSizeKB}KB exceeds cap ${rules.zipKB}KB.`);
+    else addInfo(`ZIP size: ${zipSizeKB}KB`);
 
     // Load ZIP
     let zip;
-    try {
-      zip = await JSZip.loadAsync(await file.arrayBuffer());
-    } catch (err){
-      errors.push("Failed to read ZIP: " + err.message);
-      return finish({errors,warnings,info,summaryStatus:"FAIL"});
-    }
+    try { zip = await JSZip.loadAsync(await file.arrayBuffer()); }
+    catch (err){ addError("Failed to read ZIP: " + err.message); return finish({errors,warnings,info,summaryStatus:"FAIL"}); }
 
     // Read entries
     const files = [];
@@ -250,58 +264,165 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const totalBytes = files.reduce((s,f)=>s+f.size,0);
     const totalUnzippedKB = bytesToKB(totalBytes);
-    info.push(`Unzipped total: ${totalUnzippedKB}KB (${bytesToMB(totalBytes)}MB)`);
+    addInfo(`Unzipped total: ${totalUnzippedKB}KB (${bytesToMB(totalBytes)}MB)`);
 
     // helpers
     const norm = p => (p||"").replace(/^\.?\//,'');
     const dirname = p => norm(p).replace(/\/[^\/]*$/,"");
+    const filename = p => norm(p).split('/').pop();
     const fileSizeMap = new Map(files.map(f => [norm(f.path), f.size]));
     const fileTextMap = new Map(files.map(f => [norm(f.path), f.text]));
+    const fileSet     = new Set(files.map(f => norm(f.path)));
 
-    // index.html
-    const indexFile = files.find(f => /(^|\/)index\.html$/i.test(f.path));
-    if (!indexFile) errors.push("Missing index.html.");
-    else if (!/^index\.html$/i.test(indexFile.path)) (strict?errors:warnings).push(`index.html is nested at ${indexFile.path}. Many ad servers expect it at the root.`);
+    // Entry html
+    const htmlFiles = files.filter(f => /\.html?$/i.test(f.path));
+    const indexFile = htmlFiles.find(f => /(^|\/)index\.html$/i.test(f.path));
+    if (!indexFile) addError("Missing index.html.");
+    else if (!/^index\.html$/i.test(indexFile.path)) (strict?addError:addWarn)(`index.html is nested at ${indexFile.path}. Many ad servers expect it at the root.`);
     const idxDir = indexFile ? dirname(indexFile.path) : "";
 
-    // Blocked types
-    const blocked = files.filter(f => /\.(exe|bat|cmd|sh|php|py|jar|dll)$/i.test(f.path));
-    if (blocked.length) errors.push(`Blocked file types present: ${blocked.map(f=>f.path).join(", ")}`);
+    // Unsupported/blocked file types (whitelist preferred)
+    const ALLOWED_EXT = new Set(['html','htm','js','mjs','css','json','png','jpg','jpeg','gif','svg','webp','mp4','webm','woff','woff2','txt']);
+    const BLOCKED_EXT = /(exe|bat|cmd|sh|php|py|jar|dll)$/i;
+    const unsupported = files.filter(f => !ALLOWED_EXT.has(f.ext));
+    const blocked = files.filter(f => BLOCKED_EXT.test(f.path));
+    if (unsupported.length) addWarn(`Unsupported file types present: ${unsupported.map(f=>f.path).join(', ')}`);
+    if (blocked.length) addError(`Blocked file types present: ${blocked.map(f=>f.path).join(', ')}`);
 
-    // External URLs & HTTP
-    const extUrlPattern = /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi;
-    const externalUrls = new Set(), httpUrls = new Set();
-    for (const f of files){
-      if (!f.text) continue;
-      let m; const t = f.text;
-      while ((m = extUrlPattern.exec(t)) !== null) {
-        const url = m[1];
-        if (/^data:|^mailto:|^tel:|^#/.test(url)) continue;
-        if (/^https?:\/\//i.test(url) || /^\/\//.test(url)) {
-          externalUrls.add(url);
-          if (/^http:\/\//i.test(url)) httpUrls.add(url);
+    // Global URL collectors
+    const externalUrls = new Set();
+    const httpUrls = new Set();
+    const protocolRelative = new Set();
+    const localRefs = new Set(); // referenced local asset paths
+
+    // CSS URL extractor
+    const extractCssUrls = (cssText, baseDir) => {
+      cssText.replace(/url\(([^)]+)\)/g, (m, raw) => {
+        let ref = raw.trim().replace(/^['"]|['"]$/g,"");
+        if (/^data:|^https?:|^\/\//i.test(ref) || /^#/.test(ref)) {
+          if (/^https?:/i.test(ref)) externalUrls.add(ref);
+          if (/^http:\/\//i.test(ref)) httpUrls.add(ref);
+          if (/^\/\//.test(ref)) protocolRelative.add(ref);
+          return m;
         }
+        const joined = norm(baseDir ? (baseDir + "/" + ref) : ref);
+        localRefs.add(joined);
+        return m;
+      });
+    };
+
+    // JS string URL extractor + click/unsafe API signals
+    let hasClickTag=false, hasEnablerExit=false, hardcodedOpen=false, multiExits=0, usesEval=false, usesFunctionCtor=false, usesDocWrite=false, tightInterval=false, usesTopOrParent=false, usesConsole=false, hasDebugger=false;
+
+    const scanJsText = (txt) => {
+      if (!txt) return;
+      // URLs in JS strings
+      (txt.match(/["']https?:\\/\\/[^"']+["']/g) || []).forEach(s => {
+        const u = s.slice(1,-1);
+        externalUrls.add(u);
+        if (/^http:\/\//i.test(u)) httpUrls.add(u);
+      });
+      (txt.match(/["']\\/\\/[^"']+["']/g) || []).forEach(s => protocolRelative.add(s.slice(1,-1)));
+      // click handling & hazards
+      if (/\b(clickTag\d*)\b/i.test(txt)) { hasClickTag = true; }
+      const exitMatches = txt.match(/Enabler\s*\.\s*(exit|exitOverride)\s*\(/g); if (exitMatches) { hasEnablerExit = true; }
+      if (/window\s*\.\s*open\s*\(\s*['"]https?:\/\//i.test(txt)) hardcodedOpen = true;
+      if (/clickTag\d+/i.test(txt)) multiExits = Math.max(multiExits, (txt.match(/clickTag\d+/gi)||[]).length);
+      if (/\beval\s*\(/.test(txt)) usesEval = true;
+      if (/new\s+Function\s*\(/.test(txt)) usesFunctionCtor = true;
+      if (/document\s*\.\s*write\s*\(/.test(txt)) usesDocWrite = true;
+      if (/setInterval\s*\(\s*[^,]+,\s*(\d+)\s*\)/.test(txt)) {
+        const m = txt.match(/setInterval\s*\(\s*[^,]+,\s*(\d+)\s*\)/);
+        if (m && +m[1] < 10) tightInterval = true;
       }
+      if (/(?:^|\W)(?:top\.|parent\.)/.test(txt)) usesTopOrParent = true;
+      if (/console\./.test(txt)) usesConsole = true;
+      if (/\bdebugger\b/.test(txt)) hasDebugger = true;
+    };
+
+    // HTML parse helper
+    const parseHtml = (text) => new DOMParser().parseFromString(text, "text/html");
+
+    // Scan HTML files
+    for (const f of htmlFiles){
+      const doc = parseHtml(f.text || "");
+
+      // Collect src/href
+      doc.querySelectorAll('[src], [href], [poster]').forEach(el => {
+        const attr = el.getAttribute('src') || el.getAttribute('href') || el.getAttribute('poster');
+        if (!attr) return;
+        if (/^data:|^mailto:|^tel:|^#/.test(attr)) return;
+        if (/^https?:\/\//i.test(attr)) { externalUrls.add(attr); if (/^http:\/\//i.test(attr)) httpUrls.add(attr); }
+        else if (/^\/\//.test(attr)) { protocolRelative.add(attr); }
+        else {
+          // local ref
+          const baseDir = dirname(f.path);
+          const joined = norm(baseDir ? (baseDir+"/"+attr.replace(/^\.?\//,'')) : attr.replace(/^\.?\//,''));
+          localRefs.add(joined.split('?')[0]);
+        }
+      });
+
+      // Anchor tags rule
+      if (blockAnchors && /<\s*a(\s|>)/i.test(f.text || "")) addError(`Anchor tag <a> found in ${f.path}. Use clickTag/Enabler instead of anchors.`);
+
+      // Autoplay with sound
+      doc.querySelectorAll('video[autoplay], audio[autoplay]').forEach(el => {
+        if (!el.hasAttribute('muted')) addError(`Autoplay with sound risk in ${f.path}: <${el.tagName.toLowerCase()}> should include muted when autoplaying.`);
+      });
+
+      // Inline styles url()
+      doc.querySelectorAll('[style]').forEach(el => extractCssUrls(el.getAttribute('style') || '', dirname(f.path)));
+
+      // Linked CSS content
+      doc.querySelectorAll('link[rel="stylesheet"][href]').forEach(link => {
+        const href = link.getAttribute('href');
+        if (!href || /^https?:|^\/\//i.test(href)) return;
+        const cssPath = norm((dirname(f.path) ? dirname(f.path) + '/' : '') + href.replace(/^\.?\//,''));
+        const cssText = fileTextMap.get(cssPath) || '';
+        extractCssUrls(cssText, dirname(cssPath));
+      });
+
+      // <style> blocks
+      doc.querySelectorAll('style').forEach(s => extractCssUrls(s.textContent || '', dirname(f.path)));
+
+      // Click handling signals from HTML
+      const htmlText = f.text || '';
+      if (/\b(clickTag|clickTAG|clicktag)\b/.test(htmlText)) hasClickTag = true;
+      if (/\bEnabler\s*\.\s*exit\s*\(/.test(htmlText)) hasEnablerExit = true;
+      if (/document\.write\(/.test(htmlText)) usesDocWrite = true;
     }
-    if (externalUrls.size) (strict?errors:warnings).push(`External asset URLs found (${externalUrls.size}). Examples: ${Array.from(externalUrls).slice(0,3).join(", ")}`);
-    if (httpUrls.size) errors.push(`Insecure HTTP URLs found: ${Array.from(httpUrls).slice(0,3).join(", ")}… Use HTTPS.`);
 
-    // ad.size + refs
-    let hasClickTag=false, hasEnablerExit=false, initialAssetBytes=0;
+    // Scan JS files for URLs & patterns
+    for (const f of files.filter(x => x.ext === 'js' || x.ext === 'mjs')) scanJsText(f.text || '');
+
+    // Protocol-relative policy
+    if (protocolRelative.size) (blockProtocolRelative?addError:addWarn)(`Protocol-relative URLs found: ${Array.from(protocolRelative).slice(0,3).join(', ')}…`);
+
+    // HTTPS only
+    if (httpUrls.size) addError(`Insecure HTTP URLs found: ${Array.from(httpUrls).slice(0,3).join(', ')}… Use HTTPS.`);
+
+    // External dependency policy
+    if (externalUrls.size) (strict?addError:addWarn)(`External asset URLs found (${externalUrls.size}). Examples: ${Array.from(externalUrls).slice(0,3).join(', ')}`);
+
+    // ad.size (index.html only)
     if (indexFile && indexFile.text){
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(indexFile.text, "text/html");
-
+      const doc = parseHtml(indexFile.text);
       const meta = doc.querySelector('meta[name="ad.size"]');
-      if (meta && meta.content) info.push(`ad.size: ${meta.content}`);
-      else (strict?errors:warnings).push('Missing <meta name="ad.size">.');
+      if (meta && meta.content) addInfo(`ad.size: ${meta.content}`);
+      else (strict?addError:addWarn)('Missing <meta name="ad.size">.');
+    }
 
+    // Initial load estimation (from index.html references + css)
+    let initialAssetBytes = 0;
+    if (indexFile && indexFile.text){
+      const doc = parseHtml(indexFile.text);
       const refPairs = [];
-      doc.querySelectorAll("img[src]").forEach(el => refPairs.push({url:el.getAttribute("src"), source:"<img src>"}));
-      doc.querySelectorAll('link[rel="stylesheet"][href]').forEach(el => refPairs.push({url:el.getAttribute("href"), source:'<link rel="stylesheet" href>'}));
-      doc.querySelectorAll("script[src]").forEach(el => refPairs.push({url:el.getAttribute("src"), source:"<script src>"}));
-      doc.querySelectorAll("video source[src]").forEach(el => refPairs.push({url:el.getAttribute("src"), source:"<video> source[src]"}));
-      doc.querySelectorAll("audio source[src]").forEach(el => refPairs.push({url:el.getAttribute("src"), source:"<audio> source[src]"}));
+      const pushRef = (url, source) => url && refPairs.push({url, source});
+      doc.querySelectorAll("img[src]").forEach(el => pushRef(el.getAttribute("src"), "<img src>"));
+      doc.querySelectorAll('link[rel="stylesheet"][href]').forEach(el => pushRef(el.getAttribute("href"), '<link rel="stylesheet" href>'));
+      doc.querySelectorAll("script[src]").forEach(el => pushRef(el.getAttribute("src"), "<script src>"));
+      doc.querySelectorAll("video source[src]").forEach(el => pushRef(el.getAttribute("src"), "<video> source[src]"));
+      doc.querySelectorAll("audio source[src]").forEach(el => pushRef(el.getAttribute("src"), "<audio> source[src]"));
 
       const resolveFromIndex = u => {
         let rr = (u||"").replace(/^\.?\//,'');
@@ -314,9 +435,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const p = resolveFromIndex(url); if (!p) continue;
         const size = fileSizeMap.get(p);
         if (size){ initialAssetBytes += size; initialItems.push({path:p, size, source}); }
+        localRefs.add((p||'').split('?')[0]);
       }
 
-      // Linked CSS
+      // Linked CSS (again for initial)
       const linkedCss = refPairs.filter(r => r.source.includes("stylesheet")).map(r => resolveFromIndex(r.url)).filter(Boolean);
       for (const cssPath of linkedCss){
         const cssText = fileTextMap.get(cssPath) || "";
@@ -327,63 +449,58 @@ document.addEventListener('DOMContentLoaded', () => {
           let joined = norm(baseDir ? (baseDir + "/" + ref) : ref);
           const size = fileSizeMap.get(joined);
           if (size){ initialAssetBytes += size; initialItems.push({path:joined, size, source:`${cssPath} → url(...)`}); }
+          localRefs.add(joined.split('?')[0]);
           return m;
         });
       }
 
-      // Inline <style>
+      // <style> blocks in index
       Array.from(doc.querySelectorAll("style")).forEach(s => {
         const cssText = s.textContent || "";
         cssText.replace(/url\(([^)]+)\)/g, (m, raw) => {
           let ref = raw.trim().replace(/^['"]|['"]$/g,"");
           if (/^data:|^https?:|^\/\//i.test(ref) || /^#/.test(ref)) return m;
-          let joined = resolveFromIndex(ref); if (!joined) return m;
+          let joined = norm(idxDir ? (idxDir + "/" + ref) : ref);
           const size = fileSizeMap.get(joined);
           if (size){ initialAssetBytes += size; initialItems.push({path:joined, size, source:`inline <style> → url(...)`}); }
+          localRefs.add(joined.split('?')[0]);
           return m;
         });
       });
-
-      // style="" attributes
-      Array.from(doc.querySelectorAll("[style]")).forEach(el => {
-        const cssText = el.getAttribute("style") || "";
-        cssText.replace(/url\(([^)]+)\)/g, (m, raw) => {
-          let ref = raw.trim().replace(/^['"]|['"]$/g,"");
-          if (/^data:|^https?:|^\/\//i.test(ref) || /^#/.test(ref)) return m;
-          let joined = resolveFromIndex(ref); if (!joined) return m;
-          const size = fileSizeMap.get(joined);
-          if (size){ initialAssetBytes += size; initialItems.push({path:joined, size, source:`style="" → url(...)`}); }
-          return m;
-        });
-      });
-
-      // click handling
-      const html = indexFile.text;
-      hasClickTag = /\b(clickTag|clickTAG|clicktag)\b/.test(html);
-      hasEnablerExit = /\bEnabler\s*\.\s*exit\s*\(/.test(html);
     }
 
-    // JS scan too
-    if (!hasClickTag || !hasEnablerExit){
-      const jsMatchesCT = files.some(f => f.ext === "js" && /\b(clickTag|clickTAG|clicktag)\b/.test(f.text || ""));
-      const jsMatchesEn = files.some(f => f.ext === "js" && /\bEnabler\s*\.\s*exit\s*\(/.test(f.text || ""));
-      hasClickTag = hasClickTag || jsMatchesCT;
-      hasEnablerExit = hasEnablerExit || jsMatchesEn;
-    }
-    if (!hasClickTag && !hasEnablerExit) errors.push("Missing click handling: expected global clickTag or Studio Enabler.exit().");
-    else info.push("Click handling detected: " + [hasClickTag ? "clickTag" : null, hasEnablerExit ? "Enabler.exit" : null].filter(Boolean).join(" + "));
+    // Missing local asset check (zip vs referenced)
+    const missing = Array.from(localRefs).filter(p => !fileSet.has(p));
+    if (missing.length) addError(`Missing assets referenced by HTML/CSS/JS: ${missing.slice(0,10).join(', ')}${missing.length>10?'…':''}`);
 
-    // doc.write
-    if (files.some(f => (f.text||"").includes("document.write("))) warnings.push("Usage of document.write() detected; often discouraged for ads.");
+    // Click handling policy
+    if (!hasClickTag && !hasEnablerExit) addError("Missing click handling: expected global clickTag or Studio Enabler.exit().");
+    else addInfo("Click handling detected: " + [hasClickTag ? "clickTag" : null, hasEnablerExit ? "Enabler.exit" : null].filter(Boolean).join(" + "));
+    if (hardcodedOpen) addError("Hard-coded URL open detected (window.open('https://…')). Use clickTag/Enabler.exit.");
+    if (multiExits > 1) addWarn(`Multiple clickTags detected (${multiExits}). Ensure mapping is intentional.`);
 
-    // Size checks + breakdown
+    // Hazardous APIs & hygiene
+    if (usesDocWrite) addWarn("Usage of document.write() detected; discouraged for ads.");
+    if (usesEval) addWarn("eval() detected; avoid dynamic code execution.");
+    if (usesFunctionCtor) addWarn("new Function(...) detected; avoid dynamic code execution.");
+    if (tightInterval) addWarn("Very tight setInterval detected (<10ms); may impact CPU.");
+    if (usesTopOrParent) addWarn("References to top./parent. detected; frame-busting may be blocked.");
+    if (usesConsole) addWarn("console.* statements present; remove before trafficking.");
+    if (hasDebugger) addWarn("'debugger' statements present; remove for production.");
+
+    // HTTPS + size budget checks
     const initialKB = bytesToKB(initialAssetBytes);
-    if (initialKB > rules.initialKB) errors.push(`Estimated initial load ${initialKB}KB exceeds cap ${rules.initialKB}KB.`);
-    else info.push(`Estimated initial load: ${initialKB}KB`);
-    if (totalUnzippedKB > rules.totalKB) errors.push(`Total unzipped size ${totalUnzippedKB}KB exceeds cap ${rules.totalKB}KB.`);
+    if (initialKB > rules.initialKB) addError(`Estimated initial load ${initialKB}KB exceeds cap ${rules.initialKB}KB.`);
+    else addInfo(`Estimated initial load: ${initialKB}KB`);
+    if (totalUnzippedKB > rules.totalKB) addError(`Total unzipped size ${totalUnzippedKB}KB exceeds cap ${rules.totalKB}KB.`);
+
+    // SVG inline <script> rule
+    for (const f of files.filter(x => x.ext === 'svg')){
+      if (/<\s*script\b/i.test(f.text || '')) addWarn(`Inline <script> inside SVG found: ${f.path}. Often blocked by ad platforms.`);
+    }
 
     // Preview
-    if (indexFile) { try { await buildPreview(files, indexFile, previewUrls); } catch(e){ warnings.push("Preview rendering failed: " + (e?.message || e)); } }
+    if (indexFile) { try { await buildPreview(files, indexFile, previewUrls); } catch(e){ addWarn("Preview rendering failed: " + (e?.message || e)); } }
 
     // Breakdown table
     if (initialItems.length){
@@ -459,7 +576,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // rewrite CSS
-    for (const f of files.filter(x => x.ext==="css" && typeof x.text==="string")){
+    for (const f of files.filter(x => (x.ext==="css") && typeof x.text==="string")){
       const baseDir = dirOf(f.path);
       const rewritten = (f.text||"").replace(/url\(([^)]+)\)/g,(m,raw)=>{
         let ref = raw.trim().replace(/^['"]|['"]$/g,"");
@@ -486,7 +603,7 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     };
     rewriteAttr("script[src]","src");
-    rewriteAttr('link[rel="stylesheet"][href]',"href");
+    rewriteAttr('link[rel="stylesheet"][href]','href');
     rewriteAttr("img[src]","src");
     rewriteAttr("video source[src]","src");
     rewriteAttr("audio source[src]","src");
