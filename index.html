@@ -86,9 +86,18 @@
   <section id="dropzone" class="panel mb-8 p-8 text-center border-2 border-dashed border-blue-300 hover:border-blue-400 transition">
     <p class="text-lg font-medium text-blue-900">Drag & drop your ZIP here</p>
     <p class="text-sm text-blue-700 mb-3">or</p>
-    <input id="fileInput" type="file" accept=".zip" class="block mx-auto mb-2">
+    <input id="fileInput" type="file" accept=".zip,application/zip,application/x-zip-compressed" class="block mx-auto mb-2">
     <div class="text-xs text-blue-800">Tip: if you pick the same file again, this still re-validates.</div>
     <div id="picked" class="mt-3 text-sm text-blue-800"></div>
+  </section>
+
+  <!-- Debug Console (auto-shows on errors) -->
+  <section id="debugPanel" class="panel mb-6 p-4 hidden">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="font-semibold text-blue-900">Debug Console</h3>
+      <button id="debugClear" class="text-sm text-blue-800 hover:underline">Clear</button>
+    </div>
+    <pre id="devlog" class="text-xs text-blue-900 bg-blue-50 rounded-lg p-3 overflow-auto max-h-48"></pre>
   </section>
 
   <!-- Summary -->
@@ -102,7 +111,7 @@
       <h3 class="font-semibold text-blue-900">Preview</h3>
       <div class="text-xs text-blue-800">Sandboxed preview (assets served from memory)</div>
     </div>
-    <iframe id="previewFrame" sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-modals"></iframe>
+    <iframe id="previewFrame" sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-modals allow-same-origin"></iframe>
   </section>
 
   <!-- Initial Load Breakdown -->
@@ -164,6 +173,24 @@ document.addEventListener('DOMContentLoaded', () => {
   const hideAlert = () => $("#alert").style.display="none";
   $("#alertClose").addEventListener("click", hideAlert);
 
+  // === Debug console + global error hooks ===
+  const debugPanel = document.querySelector('#debugPanel');
+  const devlog = document.querySelector('#devlog');
+  const debugClear = document.querySelector('#debugClear');
+  const dbg = (...args) => {
+    try {
+      const msg = args.map(a => (typeof a==='string'? a : JSON.stringify(a))).join(' ');
+      if (devlog) {
+        devlog.textContent += msg + "
+";
+        if (debugPanel && debugPanel.classList.contains('hidden')) debugPanel.classList.remove('hidden');
+      }
+    } catch {}
+  };
+  if (debugClear) debugClear.addEventListener('click', ()=>{ if (devlog) devlog.textContent=''; });
+  window.addEventListener('error', (e)=>{ const m = (e && e.message) ? e.message : 'Script error'; dbg('window.error:', m); });
+  window.addEventListener('unhandledrejection', (e)=>{ const r = e && e.reason ? e.reason : ''; const m = (r && (r.message || r)) || 'Unhandled promise rejection'; dbg('unhandledrejection:', m); });
+
   // Rulesets UI
   const DEFAULT_RULESETS = {
     cm360:{initialKB:150,totalKB:2200,zipKB:200},
@@ -209,7 +236,7 @@ document.addEventListener('DOMContentLoaded', () => {
     hideAlert();
     showToast("Validating…");
     setTimeout(() => validateZip(file).catch(err => {
-      hideToast(); showAlert(["Unexpected error while validating.", err?.message || String(err)]);
+      hideToast(); showAlert(["Unexpected error while validating.", (err && err.message) ? err.message : String(err)]);
     }), 30);
   }
 
@@ -242,6 +269,7 @@ document.addEventListener('DOMContentLoaded', () => {
     else addInfo(`ZIP size: ${zipSizeKB}KB`);
 
     // Load ZIP
+    if (typeof JSZip === "undefined") { addError("ZIP parser (JSZip) failed to load. Check your internet connection or CDN blocking and reload the page."); return finish({errors,warnings,info,summaryStatus:"FAIL"}); }
     let zip;
     try { zip = await JSZip.loadAsync(await file.arrayBuffer()); }
     catch (err){ addError("Failed to read ZIP: " + err.message); return finish({errors,warnings,info,summaryStatus:"FAIL"}); }
@@ -258,7 +286,7 @@ document.addEventListener('DOMContentLoaded', () => {
         bin = await entry.async("uint8array");
         if (textLike) { try { text = new TextDecoder("utf-8").decode(bin); } catch{} }
       } catch(e){}
-      const size = bin ? bin.byteLength : (entry._data?.uncompressedSize || 0);
+      const size = bin ? bin.byteLength : ((entry._data && entry._data.uncompressedSize) || 0);
       files.push({ path, size, ext, bin, text });
     }));
 
@@ -500,7 +528,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Preview
-    if (indexFile) { try { await buildPreview(files, indexFile, previewUrls); } catch(e){ addWarn("Preview rendering failed: " + (e?.message || e)); } }
+    if (indexFile) { try { await buildPreview(files, indexFile, previewUrls); } catch(e){ addWarn("Preview rendering failed: " + ((e && e.message) ? e.message : e)); } }
 
     // Breakdown table
     if (initialItems.length){
